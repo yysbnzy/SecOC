@@ -19,6 +19,9 @@ from secoc_toolkit.core.secoc_engine import SecOCEngine, kdf, cmac_cal
 from secoc_toolkit.core.freshness_manager import FreshnessManager
 from secoc_toolkit.can_drivers.can_interface import create_driver, CANMessage
 from secoc_toolkit.attacks.attack_modules import SecOCAttacks
+from secoc_toolkit.key_manager.key_tester import KeyTester
+from secoc_toolkit.parsers.dbc_parser import DBCParser
+from secoc_toolkit.verification.fv_verifier import FVVerifier
 
 
 def setup_logging(verbose: bool = False):
@@ -42,21 +45,7 @@ def run_normal_mode(config, can_driver, duration):
     logger.info("Starting normal SecOC communication mode")
     
     # Initialize engine and freshness manager
-    # Find first non-sync message (messages with protocol_flag != 0x00)
-    secoc_config = None
-    for msg in config['secoc']['messages']:
-        if msg.get('protocol_flag', 0x00) != 0x00:  # Skip sync frames like CGW1G01
-            secoc_config = msg
-            break
-    
-    if not secoc_config:
-        # Fallback: use first message with non-zero data_id or the first message overall
-        secoc_config = config['secoc']['messages'][0] if config['secoc']['messages'] else None
-    
-    if not secoc_config:
-        logger.error("No SecOC messages configured")
-        return
-    
+    secoc_config = config['secoc']['messages'][1]  # ECT1G01
     engine = SecOCEngine(secoc_config)
     
     freshness_config = config.get('freshness', {})
@@ -131,8 +120,12 @@ def run_attack_mode(config, can_driver, attack_name, msg_id):
             result = attacks.cmac_forgery(msg_id)
         elif attack_name == 'freshness_rollback':
             result = attacks.freshness_rollback(msg_id)
-        elif attack_name == 'busoff':
-            result = attacks.busoff_induction(msg_id, duration=2.0)
+        elif attack_name == 'dos_flood':
+            result = attacks.dos_flood_attack(msg_id, duration=args.duration)
+        elif attack_name == 'sync_disruption':
+            result = attacks.sync_disruption_attack(msg_id)
+        elif attack_name == 'cpu_load':
+            result = attacks.cpu_load_attack(msg_id, duration=args.duration)
         elif attack_name == 'key_interception':
             result = attacks.key_update_interception()
         elif attack_name == 'kdf_collision':
@@ -200,7 +193,8 @@ def main():
                           help='Operation mode')
     
     parser.add_argument('--attack', choices=['replay', 'cmac_forgery', 'freshness_rollback',
-                                              'busoff', 'key_interception', 'kdf_collision', 'all'],
+                                              'dos_flood', 'sync_disruption', 'cpu_load',
+                                              'key_interception', 'kdf_collision', 'all'],
                         help='Attack type (for attack mode)')
     parser.add_argument('--msg-id', type=lambda x: int(x, 0), default=0x3BF,
                         help='Target CAN message ID (hex)')

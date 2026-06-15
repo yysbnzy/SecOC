@@ -106,9 +106,9 @@ class FreshnessManager:
                 else:
                     self.reset_counter = (self.reset_counter + 1) & self.reset_max
                 
-                # NOTE: MessageCounter is NOT reset on sync boundary.
-                # It increments per-message independently in get_freshness().
-                # Only ResetCounter/TripCounter are managed by the sync loop.
+                # Reset all message counters on sync boundary
+                for msg_id in self.message_counters:
+                    self.message_counters[msg_id] = 0
                 
                 # Enable SecOC after first sync cycle
                 if not self.enabled and self._activation_triggered:

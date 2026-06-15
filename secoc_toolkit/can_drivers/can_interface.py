@@ -22,7 +22,7 @@ class CANMessage:
         self.channel = channel
     
     def __repr__(self):
-        return f"CANMessage(id=0x{self.arbitration_id:03X}, data={self.data.hex()})")
+        return f"CANMessage(id=0x{self.arbitration_id:03X}, data={self.data.hex()})"
     
     @classmethod
     def from_dict(cls, msg_dict: Dict) -> 'CANMessage':
@@ -122,24 +122,17 @@ class ZLGCANDriver(CANDriverInterface):
             import ctypes
             from ctypes import wintypes
             
-            # Try multiple possible paths (Windows + Linux)
+            # Try multiple possible paths
             dll_paths = [
                 "ZLGCANInterface.dll",
                 "zlgcan.dll",
                 "C:/Program Files (x86)/ZLG/CANalyst-II/ZLGCANInterface.dll",
                 "C:/Program Files/ZLG/CANalyst-II/ZLGCANInterface.dll",
-                "/usr/lib/libzlgcan.so",
-                "/usr/local/lib/libzlgcan.so",
-                "./libzlgcan.so",
             ]
             
             for path in dll_paths:
                 try:
-                    import sys
-                    if sys.platform == 'win32':
-                        self._dll = ctypes.windll.LoadLibrary(path)
-                    else:
-                        self._dll = ctypes.cdll.LoadLibrary(path)
+                    self._dll = ctypes.windll.LoadLibrary(path)
                     logger.info(f"Loaded ZLG DLL: {path}")
                     return True
                 except OSError:
@@ -398,24 +391,17 @@ class TOSUNCANDriver(CANDriverInterface):
         """Load TOSUN CAN DLL."""
         try:
             import ctypes
-            import sys
             
             dll_paths = [
                 "TOSUNlib.dll",
                 "libTOSUN.so",
                 "C:/Program Files/TOSUN/TSMaster/TOSUNlib.dll",
                 "C:/Program Files (x86)/TOSUN/TSMaster/TOSUNlib.dll",
-                "/usr/lib/libTOSUN.so",
-                "/usr/local/lib/libTOSUN.so",
-                "./libTOSUN.so",
             ]
             
             for path in dll_paths:
                 try:
-                    if sys.platform == 'win32':
-                        self._dll = ctypes.windll.LoadLibrary(path)
-                    else:
-                        self._dll = ctypes.cdll.LoadLibrary(path)
+                    self._dll = ctypes.windll.LoadLibrary(path)
                     logger.info(f"Loaded TOSUN DLL: {path}")
                     return True
                 except (OSError, AttributeError):
@@ -440,12 +426,11 @@ class TOSUNCANDriver(CANDriverInterface):
                 return False
             
             # Connect to device
-            handle = ctypes.c_int32(0)
-            result = self._dll.tsapp_connect(self.app_name.encode(), ctypes.byref(handle))
+            result = self._dll.tsapp_connect(self.app_name.encode(), 
+                                           ctypes.byref(ctypes.c_int32(self._handle)))
             if result != 0:
                 logger.error(f"Failed to connect to TOSUN device: {result}")
                 return False
-            self._handle = handle.value
             
             # Set CAN baud rate
             # TOSUN uses different API structure
