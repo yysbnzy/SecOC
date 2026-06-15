@@ -59,9 +59,14 @@ class SecOCAttacks:
         msg = CANMessage(arbitration_id=msg_id, data=can_data)
         return self.can_driver.send(msg)
     
-    def _record_frame(self, frame: Dict):
-        """Record frame to history."""
-        self.history.append(frame)
+    def _record_frame(self, frame: Dict, trip: int, reset: int, message: int):
+        """Record frame to history with counter values."""
+        self.history.append({
+            'frame': frame,
+            'trip': trip,
+            'reset': reset,
+            'message': message
+        })
         if len(self.history) > self._max_history:
             self.history.pop(0)
     
@@ -72,9 +77,9 @@ class SecOCAttacks:
         Replay Attack - Capture frame and resend after delay.
         
         Steps:
-        1. Send legitimate SecOC frame
+        1. Send legitimate SecOC frame with current counters
         2. Wait for one or more message periods
-        3. Resend captured frame without modification
+        3. Resend captured frame with old counter values (no modification)
         4. Check if receiver accepts (should reject due to expired counter)
         
         Args:
@@ -86,7 +91,7 @@ class SecOCAttacks:
         """
         start_time = time.time()
         
-        # Step 1: Send legitimate frame
+        # Step 1: Send legitimate frame with current counters
         fresh = self.freshness.get_freshness(msg_id)
         raw_data = b'\x00' * 8
         
@@ -94,36 +99,16 @@ class SecOCAttacks:
             fresh['trip'], fresh['reset'], fresh['message'], raw_data
         )
         self._send_frame(msg_id, raw_data, fresh['trip'], fresh['reset'], fresh['message'])
-        self._record_frame(frame)
+        self._record_frame(frame, fresh['trip'], fresh['reset'], fresh['message'])
         
-        # Step 2: Wait
+        # Step 2: Wait (during which message counter advances)
         time.sleep(delay)
         
-        # Step 3: Replay old frame
-        old_frame = self.history[-1]
+        # Step 3: Replay with old counter values (no modification)
+        old = self.history[-1]
         replayed = self._send_frame(
             msg_id, raw_data,
-            old_frame['freshness'],  # This is wrong - should be trip/reset from old frame
-            old_frame['message']     # But we need to reconstruct
-        )
-        
-        # Actually, let's do it properly
-        # Extract trip/reset/message from the old frame's freshness
-        # But we don't have them separately... Let's recapture with explicit values
-        
-        # Re-do with explicit capture
-        old_fresh = self.freshness.get_freshness(msg_id)
-        old_frame = self.engine.build_secoc_frame(
-            old_fresh['trip'], old_fresh['reset'], old_fresh['message'], raw_data
-        )
-        self._send_frame(msg_id, raw_data, old_fresh['trip'], old_fresh['reset'], old_fresh['message'])
-        
-        time.sleep(delay)
-        
-        # Replay with old counter values
-        replayed = self._send_frame(
-            msg_id, raw_data,
-            old_fresh['trip'], old_fresh['reset'], old_fresh['message']
+            old['trip'], old['reset'], old['message']
         )
         
         duration = time.time() - start_time

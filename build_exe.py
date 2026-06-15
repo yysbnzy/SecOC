@@ -10,7 +10,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 pyinstaller_run([
     '--name=SecOCToolkit',
     '--onefile',
-    '--windowed',  # Or --console for CLI output
+    '--console',  # CLI tool requires console output
     '--add-data=secoc_toolkit/config/toyota_secoc.yaml;secoc_toolkit/config',
     '--add-data=secoc_toolkit;secoc_toolkit',
     '--icon=assets/secoc_icon.ico',  # Optional

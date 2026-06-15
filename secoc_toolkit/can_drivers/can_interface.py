@@ -122,17 +122,24 @@ class ZLGCANDriver(CANDriverInterface):
             import ctypes
             from ctypes import wintypes
             
-            # Try multiple possible paths
+            # Try multiple possible paths (Windows + Linux)
             dll_paths = [
                 "ZLGCANInterface.dll",
                 "zlgcan.dll",
                 "C:/Program Files (x86)/ZLG/CANalyst-II/ZLGCANInterface.dll",
                 "C:/Program Files/ZLG/CANalyst-II/ZLGCANInterface.dll",
+                "/usr/lib/libzlgcan.so",
+                "/usr/local/lib/libzlgcan.so",
+                "./libzlgcan.so",
             ]
             
             for path in dll_paths:
                 try:
-                    self._dll = ctypes.windll.LoadLibrary(path)
+                    import sys
+                    if sys.platform == 'win32':
+                        self._dll = ctypes.windll.LoadLibrary(path)
+                    else:
+                        self._dll = ctypes.cdll.LoadLibrary(path)
                     logger.info(f"Loaded ZLG DLL: {path}")
                     return True
                 except OSError:
@@ -391,17 +398,24 @@ class TOSUNCANDriver(CANDriverInterface):
         """Load TOSUN CAN DLL."""
         try:
             import ctypes
+            import sys
             
             dll_paths = [
                 "TOSUNlib.dll",
                 "libTOSUN.so",
                 "C:/Program Files/TOSUN/TSMaster/TOSUNlib.dll",
                 "C:/Program Files (x86)/TOSUN/TSMaster/TOSUNlib.dll",
+                "/usr/lib/libTOSUN.so",
+                "/usr/local/lib/libTOSUN.so",
+                "./libTOSUN.so",
             ]
             
             for path in dll_paths:
                 try:
-                    self._dll = ctypes.windll.LoadLibrary(path)
+                    if sys.platform == 'win32':
+                        self._dll = ctypes.windll.LoadLibrary(path)
+                    else:
+                        self._dll = ctypes.cdll.LoadLibrary(path)
                     logger.info(f"Loaded TOSUN DLL: {path}")
                     return True
                 except (OSError, AttributeError):
