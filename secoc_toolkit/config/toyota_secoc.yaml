@@ -1,0 +1,91 @@
+Toyota_SecOC_Demo:
+  vehicle:
+    name: "Toyota_SecOC_Demo"
+    network: "CAN1"
+    baudrate: 500000
+
+  secoc:
+    messages:
+      - name: "CGW1G01"
+        can_id: 0x00F
+        period: 0.1
+        data_length: 8
+        aes_key: "11111111111111111111111111111111"
+        cmac_bits: 28
+        freshness_bits: 4
+        protocol_flag: 0x00
+        signals:
+          - name: "TRIPCNT"
+            start_bit: 7
+            length: 16
+          - name: "RESETCNT"
+            start_bit: 23
+            length: 20
+          - name: "KZK00F"
+            start_bit: 35
+            length: 28
+
+      - name: "ECT1G01"
+        can_id: 0x3BF
+        period: 0.1
+        data_length: 8
+        aes_key: "11111111111111111111111111111111"
+        cmac_bits: 28
+        freshness_bits: 4
+        protocol_flag: 0x20
+        signals:
+          - name: "FV3BF"
+            start_bit: 39
+            length: 4
+          - name: "KZK3BF"
+            start_bit: 35
+            length: 28
+
+      - name: "ENG1G02"
+        can_id: 0x115
+        period: 0.024
+        data_length: 8
+        aes_key: "11111111111111111111111111111111"
+        cmac_bits: 28
+        freshness_bits: 4
+        protocol_flag: 0x1F
+        signals:
+          - name: "FV115"
+            start_bit: 39
+            length: 4
+          - name: "KZK115"
+            start_bit: 35
+            length: 28
+
+  freshness:
+    trip_counter_bits: 16
+    reset_counter_bits: 20
+    message_counter_bits: 4
+    sync_period: 0.1
+    trip_update_factor: 65535
+
+  diagnostic:
+    she_keys:
+      - slot: 0
+        name: "MASTER_KEY"
+      - slot: 1
+        name: "BOOT_MAC_KEY"
+      - slot: 2
+        name: "MAC_KEY"
+      - slot: 3
+        name: "TOOL_KEY"
+      - slot: 4
+        name: "PROG_KEY"
+
+    kdf_constants:
+      KEY_UPDATE_ENC_C: "010153484500800000000000000000b0"
+      KEY_UPDATE_MAC_C: "010253484500800000000000000000b0"
+      DEBUG_KEY_C: "010353484500800000000000000000b0"
+      KEY_UPDATE_ENC_SC: "018153484500800000000000000000b0"
+      KEY_UPDATE_MAC_SC: "018253484500800000000000000000b0"
+      MASTER_ECU_KEY: "11111111111111111111111111111111"
+
+can:
+  driver: "zlg"  # Options: zlg, tosun, python-can, pcan, kvaser, vector, socketcan
+  channel: 0
+  baudrate: 500000
