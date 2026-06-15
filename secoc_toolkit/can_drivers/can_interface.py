@@ -426,11 +426,12 @@ class TOSUNCANDriver(CANDriverInterface):
                 return False
             
             # Connect to device
-            result = self._dll.tsapp_connect(self.app_name.encode(), 
-                                           ctypes.byref(ctypes.c_int32(self._handle)))
+            handle = ctypes.c_int32(0)
+            result = self._dll.tsapp_connect(self.app_name.encode(), ctypes.byref(handle))
             if result != 0:
                 logger.error(f"Failed to connect to TOSUN device: {result}")
                 return False
+            self._handle = handle.value
             
             # Set CAN baud rate
             # TOSUN uses different API structure
