@@ -120,22 +120,16 @@ class SecOCEngine:
         cobj.update(payload)
         full_cmac = cobj.digest()
         
-        # Truncate to configured bit length
-        # For 28-bit: take high 28 bits of first 4 bytes
-        if self.cmac_bits <= 28:
-            truncated = (full_cmac[0] << 20) | (full_cmac[1] << 12) | \
-                       (full_cmac[2] << 4) | (full_cmac[3] >> 4)
-        elif self.cmac_bits <= 32:
-            truncated = (full_cmac[0] << 24) | (full_cmac[1] << 16) | \
-                       (full_cmac[2] << 8) | full_cmac[3]
-        elif self.cmac_bits <= 64:
-            truncated = (full_cmac[0] << 56) | (full_cmac[1] << 48) | \
-                       (full_cmac[2] << 40) | (full_cmac[3] << 32) | \
-                       (full_cmac[4] << 24) | (full_cmac[5] << 16) | \
-                       (full_cmac[6] << 8) | full_cmac[7]
-        else:
-            # Return full 128-bit as two 64-bit integers
-            truncated = int.from_bytes(full_cmac[:16], 'big')
+        # Truncate to configured bit length using generic byte extraction
+        # Strategy: take enough bytes from the start, then shift right to discard excess bits
+        n_bytes = (self.cmac_bits + 7) // 8  # Bytes needed to hold cmac_bits
+        n_bytes = min(n_bytes, 16)  # Cap at 16 bytes (full CMAC)
+        
+        truncated = int.from_bytes(full_cmac[:n_bytes], 'big')
+        # Discard low bits if we took more bytes than needed
+        excess_bits = n_bytes * 8 - self.cmac_bits
+        if excess_bits > 0:
+            truncated >>= excess_bits
         
         return truncated & self.cmac_mask
     

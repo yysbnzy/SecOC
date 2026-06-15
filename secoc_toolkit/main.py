@@ -42,7 +42,21 @@ def run_normal_mode(config, can_driver, duration):
     logger.info("Starting normal SecOC communication mode")
     
     # Initialize engine and freshness manager
-    secoc_config = config['secoc']['messages'][1]  # ECT1G01
+    # Find first non-sync message (messages with protocol_flag != 0x00)
+    secoc_config = None
+    for msg in config['secoc']['messages']:
+        if msg.get('protocol_flag', 0x00) != 0x00:  # Skip sync frames like CGW1G01
+            secoc_config = msg
+            break
+    
+    if not secoc_config:
+        # Fallback: use first message with non-zero data_id or the first message overall
+        secoc_config = config['secoc']['messages'][0] if config['secoc']['messages'] else None
+    
+    if not secoc_config:
+        logger.error("No SecOC messages configured")
+        return
+    
     engine = SecOCEngine(secoc_config)
     
     freshness_config = config.get('freshness', {})
