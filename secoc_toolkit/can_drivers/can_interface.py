@@ -2,10 +2,27 @@
 
 import abc
 import logging
+import os
 from typing import Optional, Callable, Dict, Any
 import struct
 
 logger = logging.getLogger(__name__)
+
+
+def _check_vector_driver() -> bool:
+    """Check if Vector XL Driver Library (vxlapi64.dll) is installed."""
+    try:
+        import ctypes.util
+        lib_path = ctypes.util.find_library('vxlapi64')
+        if lib_path and os.path.exists(lib_path):
+            return True
+    except Exception:
+        pass
+    # Fallback: check common install location
+    sys_path = r'C:\Windows\System32\vxlapi64.dll'
+    if os.path.exists(sys_path):
+        return True
+    return False
 
 
 class CANMessage:
@@ -122,17 +139,24 @@ class ZLGCANDriver(CANDriverInterface):
             import ctypes
             from ctypes import wintypes
             
-            # Try multiple possible paths
+            # Try multiple possible paths (Windows + Linux)
             dll_paths = [
                 "ZLGCANInterface.dll",
                 "zlgcan.dll",
                 "C:/Program Files (x86)/ZLG/CANalyst-II/ZLGCANInterface.dll",
                 "C:/Program Files/ZLG/CANalyst-II/ZLGCANInterface.dll",
+                "/usr/lib/libzlgcan.so",
+                "/usr/local/lib/libzlgcan.so",
+                "./libzlgcan.so",
             ]
             
             for path in dll_paths:
                 try:
-                    self._dll = ctypes.windll.LoadLibrary(path)
+                    import sys
+                    if sys.platform == 'win32':
+                        self._dll = ctypes.windll.LoadLibrary(path)
+                    else:
+                        self._dll = ctypes.cdll.LoadLibrary(path)
                     logger.info(f"Loaded ZLG DLL: {path}")
                     return True
                 except OSError:
@@ -391,17 +415,24 @@ class TOSUNCANDriver(CANDriverInterface):
         """Load TOSUN CAN DLL."""
         try:
             import ctypes
+            import sys
             
             dll_paths = [
                 "TOSUNlib.dll",
                 "libTOSUN.so",
                 "C:/Program Files/TOSUN/TSMaster/TOSUNlib.dll",
                 "C:/Program Files (x86)/TOSUN/TSMaster/TOSUNlib.dll",
+                "/usr/lib/libTOSUN.so",
+                "/usr/local/lib/libTOSUN.so",
+                "./libTOSUN.so",
             ]
             
             for path in dll_paths:
                 try:
-                    self._dll = ctypes.windll.LoadLibrary(path)
+                    if sys.platform == 'win32':
+                        self._dll = ctypes.windll.LoadLibrary(path)
+                    else:
+                        self._dll = ctypes.cdll.LoadLibrary(path)
                     logger.info(f"Loaded TOSUN DLL: {path}")
                     return True
                 except (OSError, AttributeError):
@@ -426,11 +457,12 @@ class TOSUNCANDriver(CANDriverInterface):
                 return False
             
             # Connect to device
-            result = self._dll.tsapp_connect(self.app_name.encode(), 
-                                           ctypes.byref(ctypes.c_int32(self._handle)))
+            handle = ctypes.c_int32(0)
+            result = self._dll.tsapp_connect(self.app_name.encode(), ctypes.byref(handle))
             if result != 0:
                 logger.error(f"Failed to connect to TOSUN device: {result}")
                 return False
+            self._handle = handle.value
             
             # Set CAN baud rate
             # TOSUN uses different API structure
@@ -603,11 +635,48 @@ class PythonCANDriver(CANDriverInterface):
         self._kwargs = kwargs
         self._bus = None
         self._is_open = False
+        
+        # Vector: default app_name to 'CANoe' if not specified
+        if self.interface == 'vector' and 'app_name' not in self._kwargs:
+            self._kwargs['app_name'] = 'CANoe'
+            logger.info("Vector driver: default app_name set to 'CANoe'")
     
     def open(self, **kwargs) -> bool:
         """Open python-can bus."""
         if self._is_open:
             return True
+        
+        # Check Vector driver availability before attempting to open
+        if self.interface == 'vector':
+            import ctypes
+            import os
+            
+            vector_dll_found = False
+            # Common paths where vxlapi DLL might be located
+            vector_paths = [
+                "vxlapi.dll", "vxlapi64.dll",
+                os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), "System32", "vxlapi64.dll"),
+                os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), "SysWOW64", "vxlapi.dll"),
+                "C:\\Program Files\\Vector\\XL Driver Library\\bin\\vxlapi.dll",
+                "C:\\Program Files\\Vector\\XL Driver Library\\bin\\vxlapi64.dll",
+            ]
+            
+            for path in vector_paths:
+                if os.path.exists(path):
+                    vector_dll_found = True
+                    break
+            
+            if not vector_dll_found:
+                logger.error("=" * 60)
+                logger.error("Vector XL Driver Library NOT found!")
+                logger.error("-" * 60)
+                logger.error("To use Vector hardware (VN7610, etc.), please install:")
+                logger.error("  Vector XL Driver Library")
+                logger.error("Download from: https://www.vector.com/int/en/download/")
+                logger.error("-" * 60)
+                logger.error("After installation, restart the application.")
+                logger.error("=" * 60)
+                return False
         
         try:
             import can
@@ -615,10 +684,16 @@ class PythonCANDriver(CANDriverInterface):
             config = {
                 'interface': self.interface,
                 'channel': self.channel,
-                'bitrate': self.bitrate,
                 **self._kwargs
             }
+            # virtual interface does not need bitrate
+            if self.interface != 'virtual':
+                config['bitrate'] = self.bitrate
             config.update(kwargs)
+            # Remove bitrate/baudrate for virtual interface after update too
+            if config.get('interface') == 'virtual':
+                config.pop('bitrate', None)
+                config.pop('baudrate', None)
             
             self._bus = can.Bus(**config)
             self._is_open = True
@@ -716,25 +791,30 @@ class PythonCANDriver(CANDriverInterface):
         }
 
 
-def create_driver(driver_type: str, **kwargs) -> CANDriverInterface:
+def create_driver(driver_type: str, **kwargs) -> Optional[CANDriverInterface]:
     """
     Factory function to create CAN driver instances.
-    
+
     Args:
         driver_type: Driver type ('zlg', 'tosun', 'python-can', 'pcan', 'kvaser', 'vector', 'socketcan')
         **kwargs: Driver-specific configuration
-        
+
     Returns:
-        CANDriverInterface instance
+        CANDriverInterface instance, or None if Vector driver not installed
     """
     driver_type = driver_type.lower()
-    
+
     if driver_type == 'zlg':
         return ZLGCANDriver(**kwargs)
     elif driver_type == 'tosun':
         return TOSUNCANDriver(**kwargs)
-    elif driver_type in ('python-can', 'pcan', 'kvaser', 'vector', 'socketcan', 'serial'):
-        if driver_type != 'python-can':
+    elif driver_type in ('python-can', 'pcan', 'kvaser', 'vector', 'socketcan', 'serial', 'virtual'):
+        if driver_type == 'vector' and not _check_vector_driver():
+            logger.warning("Vector XL Driver Library not found.")
+            return None
+        if driver_type == 'python-can':
+            kwargs['interface'] = 'virtual'  # Default to virtual bus for testing
+        elif driver_type != 'python-can':
             kwargs['interface'] = driver_type
         return PythonCANDriver(**kwargs)
     else:
