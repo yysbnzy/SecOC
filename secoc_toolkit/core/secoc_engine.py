@@ -254,6 +254,171 @@ class SecOCEngine:
         return bytes(frame)
 
 
+class SyncFrameEngine:
+    """
+    CGW1G01 Sync Frame Engine.
+    
+    Builds and packs CGW1G01 (0x00F) synchronization frames which broadcast
+    TripCounter and ResetCounter to all SecOC nodes.
+    
+    Frame layout (8 bytes, Motorola format):
+    - Byte 0-1: TripCounter (16-bit)
+    - Byte 2-4: ResetCounter (20-bit)
+    - Byte 5-7: KZK (28-bit CMAC truncated)
+    
+    PayloadData for CMAC (different from ECT1G01):
+    - Data ID (0x00F) + Protocol Flag (0x00) + TripCounter + ResetCounter
+    - No MessageCounter (sync frame doesn't have per-message counter)
+    """
+    
+    def __init__(self, config: Dict):
+        aes_key_hex = config.get('aes_key', '11111111111111111111111111111111')
+        self.aes_key = bytes.fromhex(aes_key_hex)
+        
+        if len(self.aes_key) != 16:
+            raise ValueError(f"AES key must be 16 bytes, got {len(self.aes_key)}")
+        
+        self.data_id = config.get('data_id', 0x00F)
+        self.cmac_bits = config.get('cmac_bits', 28)
+        self.cmac_mask = (1 << self.cmac_bits) - 1
+        
+        logger.info(f"SyncFrameEngine initialized: data_id=0x{self.data_id:03X}, "
+                    f"cmac_bits={self.cmac_bits}")
+    
+    def build_payload(self, trip_counter: int, reset_counter: int) -> bytes:
+        """
+        Construct PayloadData for CGW1G01 CMAC computation.
+        
+        PayloadData format (12 bytes):
+        [0-1]  Data ID (0x00F) - Big Endian
+        [2]    Protocol flag (0x00)
+        [3]    Reserved (0x00)
+        [4-5]  TripCounter (16-bit, big endian)
+        [6-8]  ResetCounter (20-bit, big endian)
+        [9-11] Reserved (0x00)
+        
+        Args:
+            trip_counter: 16-bit trip counter
+            reset_counter: 20-bit reset counter
+            
+        Returns:
+            12-byte PayloadData
+        """
+        payload = bytearray(12)
+        
+        # [0-1] Data ID (big endian)
+        payload[0] = (self.data_id >> 8) & 0xFF
+        payload[1] = self.data_id & 0xFF
+        
+        # [2] Protocol flag (0x00 for sync frame)
+        payload[2] = 0x00
+        
+        # [3] Reserved
+        payload[3] = 0x00
+        
+        # [4-5] TripCounter (16-bit, big endian)
+        payload[4] = (trip_counter >> 8) & 0xFF
+        payload[5] = trip_counter & 0xFF
+        
+        # [6-8] ResetCounter (20-bit, big endian)
+        payload[6] = (reset_counter >> 12) & 0xFF
+        payload[7] = (reset_counter >> 4) & 0xFF
+        payload[8] = (reset_counter & 0x0F) << 4
+        
+        # [9-11] Reserved
+        payload[9] = 0x00
+        payload[10] = 0x00
+        payload[11] = 0x00
+        
+        return bytes(payload)
+    
+    def compute_cmac(self, payload: bytes) -> int:
+        """
+        Compute AES-128-CMAC and truncate to configured bit length.
+        """
+        cobj = CMAC.new(self.aes_key, ciphermod=AES)
+        cobj.update(payload)
+        full_cmac = cobj.digest()
+        
+        # Truncate to 28-bit: take high 28 bits of first 4 bytes
+        truncated = (full_cmac[0] << 20) | (full_cmac[1] << 12) | \
+                   (full_cmac[2] << 4) | (full_cmac[3] >> 4)
+        
+        return truncated & self.cmac_mask
+    
+    def build_sync_frame(self, trip_counter: int, reset_counter: int) -> Dict:
+        """
+        Build complete CGW1G01 sync frame.
+        
+        Args:
+            trip_counter: Trip counter value
+            reset_counter: Reset counter value
+            
+        Returns:
+            Dictionary with:
+                - data_id: CAN ID (0x00F)
+                - cmac: Authentication tag (KZK)
+                - payload: Auth payload (PayloadData)
+                - can_data: Final 8-byte CAN frame data
+        """
+        # Build authentication payload
+        auth_payload = self.build_payload(trip_counter, reset_counter)
+        
+        # Compute CMAC
+        cmac = self.compute_cmac(auth_payload)
+        
+        # Pack CAN frame
+        can_data = self.pack_sync_frame(trip_counter, reset_counter, cmac)
+        
+        return {
+            'data_id': self.data_id,
+            'cmac': cmac,
+            'payload': auth_payload,
+            'can_data': can_data
+        }
+    
+    def pack_sync_frame(self, trip_counter: int, reset_counter: int, cmac: int) -> bytes:
+        """
+        Pack CGW1G01 sync frame into 8-byte CAN data.
+        
+        Layout:
+        - Byte 0-1: TripCounter (16-bit, big endian)
+        - Byte 2-4: ResetCounter (20-bit) + KZK high 4-bit
+        - Byte 5-7: KZK low 24-bit
+        
+        Args:
+            trip_counter: 16-bit trip counter
+            reset_counter: 20-bit reset counter
+            cmac: 28-bit truncated CMAC (KZK)
+            
+        Returns:
+            8-byte CAN frame data
+        """
+        frame = bytearray(8)
+        
+        # Byte 0-1: TripCounter (big endian)
+        frame[0] = (trip_counter >> 8) & 0xFF
+        frame[1] = trip_counter & 0xFF
+        
+        # Byte 2: ResetCounter high 8 bits (bit 19-12)
+        frame[2] = (reset_counter >> 12) & 0xFF
+        
+        # Byte 3: ResetCounter middle 8 bits (bit 11-4)
+        frame[3] = (reset_counter >> 4) & 0xFF
+        
+        # Byte 4: ResetCounter low 4 bits (bit 3-0) + KZK high 4 bits (bit 27-24)
+        reset_low = reset_counter & 0x0F
+        kzk_high = (cmac >> 24) & 0x0F
+        frame[4] = (reset_low << 4) | kzk_high
+        
+        # Byte 5-7: KZK low 24 bits (bit 23-0)
+        frame[5] = (cmac >> 16) & 0xFF
+        frame[6] = (cmac >> 8) & 0xFF
+        frame[7] = cmac & 0xFF
+        
+        return bytes(frame)
+
+
 def kdf(master_key: bytes, salt: bytes) -> bytes:
     """
     Key Derivation Function (KDF) from Toyota SecOC Demo.
@@ -342,3 +507,18 @@ if __name__ == '__main__':
     salt = bytes.fromhex('010153484500800000000000000000b0')
     derived = kdf(mk, salt)
     print(f"Derived Key: {derived.hex()}")
+    
+    # Sync frame test
+    sync = SyncFrameEngine({
+        'aes_key': '11111111111111111111111111111111',
+        'data_id': 0x00F,
+        'cmac_bits': 28
+    })
+    sync_payload = sync.build_payload(0x0001, 0x023F7)
+    sync_cmac = sync.compute_cmac(sync_payload)
+    sync_data = sync.pack_sync_frame(0x0001, 0x023F7, sync_cmac)
+    print(f"\nSync Frame Test:")
+    print(f"Payload: {sync_payload.hex()}")
+    print(f"CMAC: 0x{sync_cmac:07X}")
+    print(f"CAN Data: {sync_data.hex()}")
+    print(f"Expected:  00 01 02 3F 78 63 4E 63")

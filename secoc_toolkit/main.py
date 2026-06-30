@@ -6,16 +6,18 @@ Usage:
     python main.py --config config/toyota_secoc.yaml --driver zlg --attack replay
     python main.py --config config/toyota_secoc.yaml --driver tosun --test all
     python main.py --config config/toyota_secoc.yaml --mode normal --duration 10
+    python main.py --config config/toyota_secoc.yaml --mode normal --duration 10 --sync
 """
 
 import argparse
 import sys
 import time
 import logging
+import threading
 import yaml
 from pathlib import Path
 
-from secoc_toolkit.core.secoc_engine import SecOCEngine, kdf, cmac_cal
+from secoc_toolkit.core.secoc_engine import SecOCEngine, SyncFrameEngine, kdf, cmac_cal
 from secoc_toolkit.core.freshness_manager import FreshnessManager
 from secoc_toolkit.can_drivers.can_interface import create_driver, CANMessage
 from secoc_toolkit.attacks.attack_modules import SecOCAttacks
@@ -39,15 +41,65 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def run_normal_mode(config, can_driver, duration):
+def _send_secoc_message(can_driver, engine, fm, msg_config, stop_event):
+    """Worker thread: send SecOC message at configured period."""
+    logger = logging.getLogger(__name__)
+    msg_id = msg_config['can_id']
+    period = msg_config['period']
+    raw_data = bytes(msg_config.get('data', [0x00] * 8))
+    
+    count = 0
+    while not stop_event.is_set():
+        try:
+            fresh = fm.get_freshness(msg_id)
+            frame = engine.build_secoc_frame(
+                fresh['trip'], fresh['reset'], fresh['message'], raw_data
+            )
+            can_data = engine.pack_can_frame(raw_data, frame['freshness'], frame['cmac'])
+            msg = CANMessage(arbitration_id=msg_id, data=can_data)
+            
+            if can_driver.send(msg):
+                count += 1
+                if count % 10 == 0:
+                    logger.info(f"[0x{msg_id:03X}] Sent {count} frames")
+            
+            time.sleep(period)
+        except Exception as e:
+            logger.error(f"[0x{msg_id:03X}] Send error: {e}")
+            time.sleep(period)
+
+
+def _send_sync_message(can_driver, sync_engine, fm, msg_config, stop_event):
+    """Worker thread: send CGW1G01 sync frame at configured period."""
+    logger = logging.getLogger(__name__)
+    msg_id = msg_config['can_id']
+    period = msg_config['period']
+    
+    count = 0
+    while not stop_event.is_set():
+        try:
+            sync_data = fm.get_sync_frame_data()
+            frame = sync_engine.build_sync_frame(sync_data['trip'], sync_data['reset'])
+            msg = CANMessage(arbitration_id=msg_id, data=frame['can_data'])
+            
+            if can_driver.send(msg):
+                count += 1
+                if count % 10 == 0:
+                    logger.info(f"[SYNC 0x{msg_id:03X}] Sent {count} sync frames, "
+                               f"trip={sync_data['trip']}, reset={sync_data['reset']}")
+            
+            time.sleep(period)
+        except Exception as e:
+            logger.error(f"[SYNC 0x{msg_id:03X}] Send error: {e}")
+            time.sleep(period)
+
+
+def run_normal_mode(config, can_driver, duration, send_sync=False):
     """Run normal SecOC communication mode."""
     logger = logging.getLogger(__name__)
     logger.info("Starting normal SecOC communication mode")
     
-    # Initialize engine and freshness manager
-    secoc_config = config['secoc']['messages'][1]  # ECT1G01
-    engine = SecOCEngine(secoc_config)
-    
+    # Initialize freshness manager
     freshness_config = config.get('freshness', {})
     fm = FreshnessManager(freshness_config)
     fm.activate()
@@ -56,35 +108,59 @@ def run_normal_mode(config, can_driver, duration):
     # Wait for sync
     time.sleep(0.5)
     
-    start_time = time.time()
-    count = 0
+    stop_event = threading.Event()
+    threads = []
     
+    # Start sync frame thread if enabled
+    sync_config = None
+    business_configs = []
+    
+    for msg in config['secoc']['messages']:
+        if msg['name'] == 'CGW1G01':
+            sync_config = msg
+        else:
+            business_configs.append(msg)
+    
+    if send_sync and sync_config:
+        logger.info(f"Starting sync frame sender: 0x{sync_config['can_id']:03X} "
+                   f"(period={sync_config['period']}s)")
+        sync_engine = SyncFrameEngine(sync_config)
+        sync_thread = threading.Thread(
+            target=_send_sync_message,
+            args=(can_driver, sync_engine, fm, sync_config, stop_event),
+            daemon=True
+        )
+        sync_thread.start()
+        threads.append(sync_thread)
+    
+    # Start business message threads
+    for msg_config in business_configs:
+        logger.info(f"Starting message sender: 0x{msg_config['can_id']:03X} "
+                   f"(period={msg_config['period']}s)")
+        engine = SecOCEngine(msg_config)
+        t = threading.Thread(
+            target=_send_secoc_message,
+            args=(can_driver, engine, fm, msg_config, stop_event),
+            daemon=True
+        )
+        t.start()
+        threads.append(t)
+    
+    # Run for duration
+    start_time = time.time()
     try:
         while time.time() - start_time < duration:
-            fresh = fm.get_freshness(secoc_config['can_id'])
-            raw_data = b'\x00' * 8
-            
-            frame = engine.build_secoc_frame(
-                fresh['trip'], fresh['reset'], fresh['message'], raw_data
-            )
-            
-            can_data = engine.pack_can_frame(raw_data, frame['freshness'], frame['cmac'])
-            msg = CANMessage(arbitration_id=secoc_config['can_id'], data=can_data)
-            
-            if can_driver.send(msg):
-                count += 1
-                if count % 10 == 0:
-                    logger.info(f"Sent {count} frames")
-            
-            time.sleep(secoc_config['period'])
-            
+            time.sleep(0.1)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     finally:
+        stop_event.set()
+        for t in threads:
+            t.join(timeout=1.0)
         fm.stop_sync()
         can_driver.close()
     
-    logger.info(f"Normal mode completed: {count} frames sent")
+    logger.info("Normal mode completed")
 
 
 def run_attack_mode(config, can_driver, attack_name, msg_id):
@@ -199,6 +275,8 @@ def main():
     parser.add_argument('--msg-id', type=lambda x: int(x, 0), default=0x3BF,
                         help='Target CAN message ID (hex)')
     parser.add_argument('--duration', type=int, default=10, help='Duration in seconds')
+    parser.add_argument('--sync', action='store_true',
+                        help='Send CGW1G01 sync frame (for normal mode)')
     
     parser.add_argument('--uid', help='UID for ICUS verification (diag mode)')
     parser.add_argument('--challenge', help='Challenge for ICUS verification (diag mode)')
@@ -231,7 +309,7 @@ def main():
     
     # Run mode
     if args.mode == 'normal':
-        run_normal_mode(config, can_driver, args.duration)
+        run_normal_mode(config, can_driver, args.duration, send_sync=args.sync)
     elif args.mode == 'attack':
         if not args.attack:
             print("Error: --attack required for attack mode")
