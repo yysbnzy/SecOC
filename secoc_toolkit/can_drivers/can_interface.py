@@ -3,26 +3,222 @@
 import abc
 import logging
 import os
+import sys
+import ctypes.util
 from typing import Optional, Callable, Dict, Any
 import struct
 
 logger = logging.getLogger(__name__)
 
 
+# ── Driver metadata & help messages ──────────────────────────
+DRIVER_INFO: Dict[str, Dict[str, Any]] = {
+    "vector": {
+        "display_name": "Vector XL Driver",
+        "dll_files": ["vxlapi64.dll", "vxlapi.dll"],
+        "download_url": "https://www.vector.com/int/en/download/",
+        "description": "Vector VN 系列 CAN 接口 (VN1610/VN1630/VN7640 等)",
+    },
+    "zlg": {
+        "display_name": "ZLG 周立功 CAN Driver",
+        "dll_files": ["ZLGCANInterface.dll", "zlgcan.dll"],
+        "download_url": "https://www.zlg.cn/can/down/down/id/22.html",
+        "description": "周立功 CANalyst-II / USBCAN 系列",
+    },
+    "tosun": {
+        "display_name": "TOSUN 同星 CAN Driver",
+        "dll_files": ["TOSUNlib.dll", "TOSUN_CAN.dll"],
+        "download_url": "https://www.tosunai.com/downloads",
+        "description": "同星 TSMaster / TC1016 / TC1026 系列",
+    },
+    "pcan": {
+        "display_name": "PEAK PCAN Driver",
+        "dll_files": ["PCANBasic.dll"],
+        "download_url": "https://www.peak-system.com/quick/DrvSetup",
+        "description": "PEAK PCAN-USB 系列",
+    },
+    "kvaser": {
+        "display_name": "Kvaser CAN Driver",
+        "dll_files": ["canlib32.dll", "kvlclib.dll"],
+        "download_url": "https://www.kvaser.com/download/",
+        "description": "Kvaser Leaf / Memorator 系列",
+    },
+    "socketcan": {
+        "display_name": "SocketCAN",
+        "dll_files": [],
+        "download_url": "",
+        "description": "Linux 内核 CAN 接口 (Windows 不支持)",
+        "windows_supported": False,
+    },
+    "virtual": {
+        "display_name": "Virtual CAN Bus",
+        "dll_files": [],
+        "download_url": "",
+        "description": "python-can 虚拟总线 (无需硬件)",
+    },
+}
+
+
+class DriverNotFoundError(Exception):
+    """Raised when a CAN driver cannot be found or loaded."""
+
+    def __init__(
+        self,
+        driver_key: str,
+        missing_files: list,
+        download_url: str = "",
+        extra_msg: str = "",
+    ):
+        self.driver_key = driver_key
+        self.missing_files = missing_files
+        self.download_url = download_url
+        self.extra_msg = extra_msg
+        super().__init__(self._format_msg())
+
+    def _format_msg(self) -> str:
+        info = DRIVER_INFO.get(self.driver_key, {})
+        name = info.get("display_name", self.driver_key)
+        lines = [
+            f"驱动名称: {name}",
+        ]
+        if self.missing_files:
+            lines.append(f"缺少文件: {', '.join(self.missing_files)}")
+        if self.download_url:
+            lines.append(f"官方下载: {self.download_url}")
+        if self.extra_msg:
+            lines.append(self.extra_msg)
+        return "\n".join(lines)
+
+    def to_gui_message(self) -> str:
+        """Return a user-friendly message for GUI popup."""
+        info = DRIVER_INFO.get(self.driver_key, {})
+        name = info.get("display_name", self.driver_key)
+        desc = info.get("description", "")
+        lines = [
+            f"驱动名称: {name}",
+        ]
+        if desc:
+            lines.append(f"驱动说明: {desc}")
+        if self.missing_files:
+            lines.append(f"\n缺少以下文件:")
+            for f in self.missing_files:
+                lines.append(f"  • {f}")
+        if self.download_url:
+            lines.append(f"\n官方下载链接:")
+            lines.append(f"  {self.download_url}")
+        if self.extra_msg:
+            lines.append(f"\n{self.extra_msg}")
+        lines.append("\n提示: 如需无硬件测试，请选择 'virtual (无需硬件)'")
+        return "\n".join(lines)
+
+
+def _find_any(paths: list) -> Optional[str]:
+    """Return the first existing path, or None."""
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def _check_vector_driver() -> bool:
     """Check if Vector XL Driver Library (vxlapi64.dll) is installed."""
     try:
-        import ctypes.util
-        lib_path = ctypes.util.find_library('vxlapi64')
+        lib_path = ctypes.util.find_library("vxlapi64")
         if lib_path and os.path.exists(lib_path):
             return True
     except Exception:
         pass
-    # Fallback: check common install location
-    sys_path = r'C:\Windows\System32\vxlapi64.dll'
-    if os.path.exists(sys_path):
-        return True
-    return False
+    # Fallback: check common install locations
+    fallback_paths = [
+        r"C:\Windows\System32\vxlapi64.dll",
+        r"C:\Windows\SysWOW64\vxlapi.dll",
+        r"C:\Program Files\Vector\XL Driver Library\bin\vxlapi64.dll",
+        r"C:\Program Files\Vector\XL Driver Library\bin\vxlapi.dll",
+        r"C:\Program Files (x86)\Vector\XL Driver Library\bin\vxlapi.dll",
+    ]
+    return _find_any(fallback_paths) is not None
+
+
+def _check_zlg_driver() -> tuple[bool, list]:
+    """Check if ZLG driver DLL is available. Returns (found, missing_files)."""
+    dll_names = DRIVER_INFO["zlg"]["dll_files"]
+    search_paths = []
+    for name in dll_names:
+        # Try current dir / PATH
+        found = ctypes.util.find_library(name.replace(".dll", ""))
+        if found and os.path.exists(found):
+            return True, []
+        search_paths.append(name)
+        # Common install locations
+        search_paths.extend([
+            f"C:/Program Files (x86)/ZLG/CANalyst-II/{name}",
+            f"C:/Program Files/ZLG/CANalyst-II/{name}",
+            f"C:/Windows/System32/{name}",
+            f"C:/Windows/SysWOW64/{name}",
+        ])
+    found_path = _find_any(search_paths)
+    if found_path:
+        return True, []
+    return False, dll_names
+
+
+def _check_tosun_driver() -> tuple[bool, list]:
+    """Check if TOSUN driver DLL is available. Returns (found, missing_files)."""
+    dll_names = DRIVER_INFO["tosun"]["dll_files"]
+    search_paths = []
+    for name in dll_names:
+        found = ctypes.util.find_library(name.replace(".dll", ""))
+        if found and os.path.exists(found):
+            return True, []
+        search_paths.append(name)
+        search_paths.extend([
+            f"C:/Program Files/TOSUN/TSMaster/{name}",
+            f"C:/Program Files (x86)/TOSUN/TSMaster/{name}",
+            f"C:/Windows/System32/{name}",
+            f"C:/Windows/SysWOW64/{name}",
+        ])
+    found_path = _find_any(search_paths)
+    if found_path:
+        return True, []
+    return False, dll_names
+
+
+def _check_pcan_driver() -> tuple[bool, list]:
+    """Check if PEAK PCAN driver DLL is available. Returns (found, missing_files)."""
+    dll_name = "PCANBasic.dll"
+    found = ctypes.util.find_library("PCANBasic")
+    if found and os.path.exists(found):
+        return True, []
+    search_paths = [
+        dll_name,
+        "C:/Windows/System32/PCANBasic.dll",
+        "C:/Windows/SysWOW64/PCANBasic.dll",
+        "C:/Program Files/PEAK-System/PCAN-Basic/PCANBasic.dll",
+        "C:/Program Files (x86)/PEAK-System/PCAN-Basic/PCANBasic.dll",
+    ]
+    if _find_any(search_paths):
+        return True, []
+    return False, [dll_name]
+
+
+def _check_kvaser_driver() -> tuple[bool, list]:
+    """Check if Kvaser driver DLL is available. Returns (found, missing_files)."""
+    dll_names = DRIVER_INFO["kvaser"]["dll_files"]
+    search_paths = []
+    for name in dll_names:
+        found = ctypes.util.find_library(name.replace(".dll", ""))
+        if found and os.path.exists(found):
+            return True, []
+        search_paths.append(name)
+        search_paths.extend([
+            f"C:/Windows/System32/{name}",
+            f"C:/Windows/SysWOW64/{name}",
+            f"C:/Program Files/Kvaser/Canlib/Lib/{name}",
+            f"C:/Program Files (x86)/Kvaser/Canlib/Lib/{name}",
+        ])
+    if _find_any(search_paths):
+        return True, []
+    return False, dll_names
 
 
 class CANMessage:
@@ -134,11 +330,11 @@ class ZLGCANDriver(CANDriverInterface):
         self._dll = None
     
     def _load_dll(self) -> bool:
-        """Load ZLG CAN DLL."""
+        """Load ZLG CAN DLL. Raises DriverNotFoundError on failure."""
         try:
             import ctypes
             from ctypes import wintypes
-            
+
             # Try multiple possible paths (Windows + Linux)
             dll_paths = [
                 "ZLGCANInterface.dll",
@@ -149,7 +345,7 @@ class ZLGCANDriver(CANDriverInterface):
                 "/usr/local/lib/libzlgcan.so",
                 "./libzlgcan.so",
             ]
-            
+
             for path in dll_paths:
                 try:
                     import sys
@@ -161,13 +357,24 @@ class ZLGCANDriver(CANDriverInterface):
                     return True
                 except OSError:
                     continue
-            
-            logger.error("Failed to load ZLG CAN DLL. Please install ZLG driver.")
-            return False
-            
+
+            raise DriverNotFoundError(
+                driver_key="zlg",
+                missing_files=DRIVER_INFO["zlg"]["dll_files"],
+                download_url=DRIVER_INFO["zlg"]["download_url"],
+                extra_msg="请安装 ZLG 驱动后重试。",
+            )
+
+        except DriverNotFoundError:
+            raise
         except Exception as e:
             logger.error(f"Error loading ZLG DLL: {e}")
-            return False
+            raise DriverNotFoundError(
+                driver_key="zlg",
+                missing_files=DRIVER_INFO["zlg"]["dll_files"],
+                download_url=DRIVER_INFO["zlg"]["download_url"],
+                extra_msg=f"加载异常: {e}",
+            )
     
     def open(self, **kwargs) -> bool:
         """Open ZLG CAN channel."""
@@ -412,11 +619,11 @@ class TOSUNCANDriver(CANDriverInterface):
         self._dll = None
     
     def _load_dll(self) -> bool:
-        """Load TOSUN CAN DLL."""
+        """Load TOSUN CAN DLL. Raises DriverNotFoundError on failure."""
         try:
             import ctypes
             import sys
-            
+
             dll_paths = [
                 "TOSUNlib.dll",
                 "libTOSUN.so",
@@ -426,7 +633,7 @@ class TOSUNCANDriver(CANDriverInterface):
                 "/usr/local/lib/libTOSUN.so",
                 "./libTOSUN.so",
             ]
-            
+
             for path in dll_paths:
                 try:
                     if sys.platform == 'win32':
@@ -437,13 +644,24 @@ class TOSUNCANDriver(CANDriverInterface):
                     return True
                 except (OSError, AttributeError):
                     continue
-            
-            logger.error("Failed to load TOSUN CAN DLL. Please install TOSUN driver.")
-            return False
-            
+
+            raise DriverNotFoundError(
+                driver_key="tosun",
+                missing_files=DRIVER_INFO["tosun"]["dll_files"],
+                download_url=DRIVER_INFO["tosun"]["download_url"],
+                extra_msg="请安装 TOSUN 驱动后重试。",
+            )
+
+        except DriverNotFoundError:
+            raise
         except Exception as e:
             logger.error(f"Error loading TOSUN DLL: {e}")
-            return False
+            raise DriverNotFoundError(
+                driver_key="tosun",
+                missing_files=DRIVER_INFO["tosun"]["dll_files"],
+                download_url=DRIVER_INFO["tosun"]["download_url"],
+                extra_msg=f"加载异常: {e}",
+            )
     
     def open(self, **kwargs) -> bool:
         """Open TOSUN CAN channel."""
@@ -645,42 +863,49 @@ class PythonCANDriver(CANDriverInterface):
         """Open python-can bus."""
         if self._is_open:
             return True
-        
-        # Check Vector driver availability before attempting to open
+
+        # ── Platform checks ─────────────────────────────
+        if self.interface == 'socketcan' and sys.platform == 'win32':
+            raise DriverNotFoundError(
+                driver_key="socketcan",
+                missing_files=[],
+                download_url="",
+                extra_msg="Windows 不支持 SocketCAN，请选择 virtual 或其他驱动。",
+            )
+
+        # ── Per-driver DLL pre-checks ───────────────────
         if self.interface == 'vector':
-            import ctypes
-            import os
-            
-            vector_dll_found = False
-            # Common paths where vxlapi DLL might be located
-            vector_paths = [
-                "vxlapi.dll", "vxlapi64.dll",
-                os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), "System32", "vxlapi64.dll"),
-                os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), "SysWOW64", "vxlapi.dll"),
-                "C:\\Program Files\\Vector\\XL Driver Library\\bin\\vxlapi.dll",
-                "C:\\Program Files\\Vector\\XL Driver Library\\bin\\vxlapi64.dll",
-            ]
-            
-            for path in vector_paths:
-                if os.path.exists(path):
-                    vector_dll_found = True
-                    break
-            
-            if not vector_dll_found:
-                logger.error("=" * 60)
-                logger.error("Vector XL Driver Library NOT found!")
-                logger.error("-" * 60)
-                logger.error("To use Vector hardware (VN7610, etc.), please install:")
-                logger.error("  Vector XL Driver Library")
-                logger.error("Download from: https://www.vector.com/int/en/download/")
-                logger.error("-" * 60)
-                logger.error("After installation, restart the application.")
-                logger.error("=" * 60)
-                return False
-        
+            if not _check_vector_driver():
+                raise DriverNotFoundError(
+                    driver_key="vector",
+                    missing_files=DRIVER_INFO["vector"]["dll_files"],
+                    download_url=DRIVER_INFO["vector"]["download_url"],
+                    extra_msg="请安装 Vector XL Driver Library（免费）后重试。",
+                )
+
+        elif self.interface == 'pcan':
+            found, missing = _check_pcan_driver()
+            if not found:
+                raise DriverNotFoundError(
+                    driver_key="pcan",
+                    missing_files=missing,
+                    download_url=DRIVER_INFO["pcan"]["download_url"],
+                    extra_msg="请安装 PEAK PCAN-Basic 驱动后重试。",
+                )
+
+        elif self.interface == 'kvaser':
+            found, missing = _check_kvaser_driver()
+            if not found:
+                raise DriverNotFoundError(
+                    driver_key="kvaser",
+                    missing_files=missing,
+                    download_url=DRIVER_INFO["kvaser"]["download_url"],
+                    extra_msg="请安装 Kvaser CANlib SDK 后重试。",
+                )
+
         try:
             import can
-            
+
             config = {
                 'interface': self.interface,
                 'channel': self.channel,
@@ -694,18 +919,41 @@ class PythonCANDriver(CANDriverInterface):
             if config.get('interface') == 'virtual':
                 config.pop('bitrate', None)
                 config.pop('baudrate', None)
-            
+
             self._bus = can.Bus(**config)
             self._is_open = True
             logger.info(f"python-can bus opened: interface={self.interface}, "
                        f"channel={self.channel}, bitrate={self.bitrate}")
             return True
-            
+
         except ImportError:
             logger.error("python-can not installed. Run: pip install python-can")
             return False
         except Exception as e:
             logger.error(f"Error opening python-can: {e}")
+            # If python-can itself reports a DLL error, try to wrap it
+            err_str = str(e).lower()
+            if 'pcan' in err_str or 'peak' in err_str:
+                raise DriverNotFoundError(
+                    driver_key="pcan",
+                    missing_files=DRIVER_INFO["pcan"]["dll_files"],
+                    download_url=DRIVER_INFO["pcan"]["download_url"],
+                    extra_msg=f"python-can 报错: {e}",
+                )
+            elif 'kvaser' in err_str or 'canlib' in err_str:
+                raise DriverNotFoundError(
+                    driver_key="kvaser",
+                    missing_files=DRIVER_INFO["kvaser"]["dll_files"],
+                    download_url=DRIVER_INFO["kvaser"]["download_url"],
+                    extra_msg=f"python-can 报错: {e}",
+                )
+            elif 'vector' in err_str or 'vxlapi' in err_str:
+                raise DriverNotFoundError(
+                    driver_key="vector",
+                    missing_files=DRIVER_INFO["vector"]["dll_files"],
+                    download_url=DRIVER_INFO["vector"]["download_url"],
+                    extra_msg=f"python-can 报错: {e}",
+                )
             return False
     
     def close(self) -> None:
@@ -801,22 +1049,86 @@ def create_driver(driver_type: str, **kwargs) -> Optional[CANDriverInterface]:
 
     Returns:
         CANDriverInterface instance, or None if Vector driver not installed
+
+    Raises:
+        DriverNotFoundError: If required driver DLL is missing or unsupported on this platform.
     """
     driver_type = driver_type.lower()
 
+    # ── Platform / unsupported checks ─────────────────
+    if driver_type == 'socketcan' and sys.platform == 'win32':
+        raise DriverNotFoundError(
+            driver_key="socketcan",
+            missing_files=[],
+            download_url="",
+            extra_msg="Windows 不支持 SocketCAN，请选择 virtual 或其他驱动。",
+        )
+
+    # ── Pre-check hardware drivers ────────────────────
     if driver_type == 'zlg':
+        found, missing = _check_zlg_driver()
+        if not found:
+            raise DriverNotFoundError(
+                driver_key="zlg",
+                missing_files=missing,
+                download_url=DRIVER_INFO["zlg"]["download_url"],
+                extra_msg="请安装 ZLG 驱动后重试。",
+            )
         return ZLGCANDriver(**kwargs)
+
     elif driver_type == 'tosun':
+        found, missing = _check_tosun_driver()
+        if not found:
+            raise DriverNotFoundError(
+                driver_key="tosun",
+                missing_files=missing,
+                download_url=DRIVER_INFO["tosun"]["download_url"],
+                extra_msg="请安装 TOSUN 驱动后重试。",
+            )
         return TOSUNCANDriver(**kwargs)
-    elif driver_type in ('python-can', 'pcan', 'kvaser', 'vector', 'socketcan', 'serial', 'virtual'):
-        if driver_type == 'vector' and not _check_vector_driver():
-            logger.warning("Vector XL Driver Library not found.")
-            return None
+
+    elif driver_type == 'vector':
+        if not _check_vector_driver():
+            raise DriverNotFoundError(
+                driver_key="vector",
+                missing_files=DRIVER_INFO["vector"]["dll_files"],
+                download_url=DRIVER_INFO["vector"]["download_url"],
+                extra_msg="请安装 Vector XL Driver Library（免费）后重试。",
+            )
+        kwargs['interface'] = 'vector'
+        return PythonCANDriver(**kwargs)
+
+    elif driver_type == 'pcan':
+        found, missing = _check_pcan_driver()
+        if not found:
+            raise DriverNotFoundError(
+                driver_key="pcan",
+                missing_files=missing,
+                download_url=DRIVER_INFO["pcan"]["download_url"],
+                extra_msg="请安装 PEAK PCAN-Basic 驱动后重试。",
+            )
+        kwargs['interface'] = 'pcan'
+        return PythonCANDriver(**kwargs)
+
+    elif driver_type == 'kvaser':
+        found, missing = _check_kvaser_driver()
+        if not found:
+            raise DriverNotFoundError(
+                driver_key="kvaser",
+                missing_files=missing,
+                download_url=DRIVER_INFO["kvaser"]["download_url"],
+                extra_msg="请安装 Kvaser CANlib SDK 后重试。",
+            )
+        kwargs['interface'] = 'kvaser'
+        return PythonCANDriver(**kwargs)
+
+    elif driver_type in ('python-can', 'serial', 'virtual'):
         if driver_type == 'python-can':
             kwargs['interface'] = 'virtual'  # Default to virtual bus for testing
-        elif driver_type != 'python-can':
+        else:
             kwargs['interface'] = driver_type
         return PythonCANDriver(**kwargs)
+
     else:
         raise ValueError(f"Unknown driver type: {driver_type}. "
                         f"Supported: zlg, tosun, python-can, pcan, kvaser, vector, socketcan")

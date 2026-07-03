@@ -16,7 +16,7 @@ from pathlib import Path
 # Import toolkit modules
 from core.secoc_engine import SecOCEngine, kdf, cmac_cal, SyncFrameEngine
 from core.freshness_manager import FreshnessManager
-from can_drivers.can_interface import create_driver, CANMessage
+from can_drivers.can_interface import create_driver, CANMessage, DriverNotFoundError
 from attacks.attack_modules import SecOCAttacks
 import yaml
 import time
@@ -390,7 +390,7 @@ class SecOCGUI:
             raise
 
     def create_driver(self):
-        """Create and open CAN driver."""
+        """Create and open CAN driver with unified error handling."""
         driver_display = self.driver_var.get()
         driver = self.driver_map.get(driver_display, driver_display)
         channel = self.channel_var.get()
@@ -406,31 +406,34 @@ class SecOCGUI:
         try:
             can_drv = create_driver(driver, **kwargs)
             if can_drv is None:
-                # Vector driver not installed
-                if driver == 'vector':
-                    error_msg = (
-                        "Vector 驱动未检测到。请安装 Vector XL Driver Library（免费）后重试。\n"
-                        "下载地址：https://www.vector.com/int/en/download/"
-                    )
-                    self.root.after(0, lambda: messagebox.showwarning("驱动未安装", error_msg))
-                else:
-                    self.root.after(0, lambda: messagebox.showerror(
-                        "驱动错误", f"无法创建驱动: {driver_display}"))
+                # Legacy fallback – should not happen with new DriverNotFoundError
+                self.root.after(0, lambda: messagebox.showerror(
+                    "驱动错误", f"无法创建驱动: {driver_display}"))
                 return None
+
             if not can_drv.open():
-                raise RuntimeError(f"Failed to open CAN driver: {driver}")
+                raise RuntimeError(f"CAN 驱动打开失败: {driver}")
+
             self.can_driver = can_drv
             self.log(f"CAN driver opened: {driver}", "INFO")
             return can_drv
+
+        except DriverNotFoundError as e:
+            # Unified popup with driver name, missing files, download URL
+            self.root.after(0, lambda: messagebox.showwarning(
+                "驱动未安装", e.to_gui_message()))
+            return None
+
         except Exception as e:
-            error_msg = f"驱动打开失败: {driver_display}\n\n"
-            error_msg += f"错误信息: {e}\n\n"
-            error_msg += "请检查:\n"
-            error_msg += "1. 硬件已连接并通电\n"
-            error_msg += "2. 驱动软件已正确安装\n"
-            error_msg += "3. 通道号设置正确\n"
-            error_msg += "\n提示: 选择 'virtual (无需硬件)' 可在无硬件环境下测试。"
-            # Show messagebox on main thread
+            error_msg = (
+                f"驱动打开失败: {driver_display}\n\n"
+                f"错误信息: {e}\n\n"
+                f"请检查:\n"
+                f"1. 硬件已连接并通电\n"
+                f"2. 驱动软件已正确安装\n"
+                f"3. 通道号设置正确\n"
+                f"\n提示: 选择 'virtual (无需硬件)' 可在无硬件环境下测试。"
+            )
             self.root.after(0, lambda: messagebox.showerror("驱动错误", error_msg))
             return None
 
