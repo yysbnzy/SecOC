@@ -5,8 +5,8 @@ import time
 from typing import Optional, Dict, List, Tuple, Callable
 from dataclasses import dataclass
 
-from ..core.secoc_engine import kdf, cmac_cal
-from ..can_drivers.can_interface import CANDriverInterface, CANMessage
+from core.secoc_engine import kdf, cmac_cal
+from can_drivers.can_interface import CANDriverInterface, CANMessage
 
 logger = logging.getLogger(__name__)
 

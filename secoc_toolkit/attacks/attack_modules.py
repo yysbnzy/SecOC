@@ -6,9 +6,9 @@ import logging
 from typing import Dict, Optional, List, Tuple
 from dataclasses import dataclass
 
-from ..core.secoc_engine import SecOCEngine
-from ..core.freshness_manager import FreshnessManager
-from ..can_drivers.can_interface import CANMessage, CANDriverInterface
+from core.secoc_engine import SecOCEngine, kdf
+from core.freshness_manager import FreshnessManager
+from can_drivers.can_interface import CANMessage, CANDriverInterface
 
 logger = logging.getLogger(__name__)
 
@@ -523,8 +523,7 @@ class SecOCAttacks:
         # - Old key for M3 computation
 
         # Simulate M1/M2/M3 structure
-        from ..core.secoc_engine import kdf
-
+        from core.secoc_engine import kdf
         master_key = bytes.fromhex('11111111111111111111111111111111')
         salt = bytes.fromhex(f'010{key_slot+1}5348450080000000000000000000b0')
 
@@ -574,8 +573,7 @@ class SecOCAttacks:
         """
         start_time = time.time()
 
-        from ..core.secoc_engine import kdf
-
+        from core.secoc_engine import kdf
         seen_outputs = {}
         collisions = []
 

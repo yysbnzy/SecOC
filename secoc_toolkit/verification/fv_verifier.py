@@ -4,8 +4,8 @@ import logging
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 
-from ..core.secoc_engine import SecOCEngine
-from ..core.freshness_manager import FreshnessManager
+from core.secoc_engine import SecOCEngine
+from core.freshness_manager import FreshnessManager
 
 logger = logging.getLogger(__name__)
 

@@ -28,9 +28,9 @@ import logging
 from typing import Dict, Optional
 from dataclasses import dataclass
 
-from ..core.secoc_engine import SecOCEngine
-from ..core.freshness_manager import FreshnessManager
-from ..can_drivers.can_interface import CANMessage, CANDriverInterface
+from core.secoc_engine import SecOCEngine
+from core.freshness_manager import FreshnessManager
+from can_drivers.can_interface import CANMessage, CANDriverInterface
 
 logger = logging.getLogger(__name__)
 
